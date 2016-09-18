@@ -1,0 +1,12 @@
+.idea
+*.iml
+.classpath
+.project
+.vagrant/
+.settings
+git.properties
+target/
+lib/
+/bin
+*.versionsBackup
+.DS_Store
