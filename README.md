@@ -1,7 +1,7 @@
 
-# thrift protocol sniffer
+# thriftcopy
 
-选择本地网卡，通过底层 libpcap 抓包，过滤出所有本地 发出 和 收到的 请求。
+选择本地网卡，通过底层 libpcap 抓包，过滤出所有本地 发出 和 收到的 thrift 请求，并将指定方法的请求包转发到指定远程机器。
 
 
 ```
@@ -21,8 +21,11 @@ usege:
 
 ```
 java -jar pcaptest-0.1.0-jar-with-dependencies.jar [ip_torepost] [port_torepost] [methodName...]
-```
 
+or
+
+java -jar pcaptest-0.1.0-jar-with-dependencies.jar // just a thrift protocol sniffer
+```
 
 
 
