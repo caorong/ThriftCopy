@@ -27,5 +27,10 @@ or
 java -jar pcaptest-0.1.0-jar-with-dependencies.jar // just a thrift protocol sniffer
 ```
 
+## feature and limit
+
+1. only support framed transport
+2. do not support `oneway` type
+
 
 

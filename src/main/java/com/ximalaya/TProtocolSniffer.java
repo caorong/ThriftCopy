@@ -23,17 +23,20 @@ import io.netty.util.concurrent.Future;
 import io.netty.util.concurrent.GenericFutureListener;
 
 import java.io.EOFException;
-import java.io.UnsupportedEncodingException;
 import java.net.Inet4Address;
 import java.net.InetSocketAddress;
-import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeoutException;
 
-import org.apache.thrift.TException;
+import org.apache.commons.cli.CommandLine;
+import org.apache.commons.cli.CommandLineParser;
+import org.apache.commons.cli.DefaultParser;
+import org.apache.commons.cli.HelpFormatter;
+import org.apache.commons.cli.Option;
+import org.apache.commons.cli.Options;
+import org.apache.commons.cli.ParseException;
 import org.apache.thrift.protocol.TMessageType;
-import org.apache.thrift.protocol.TProtocolException;
 import org.pcap4j.core.BpfProgram;
 import org.pcap4j.core.NotOpenException;
 import org.pcap4j.core.PcapAddress;
@@ -50,6 +53,8 @@ import org.pcap4j.packet.namednumber.TcpPort;
 import org.pcap4j.util.NifSelector;
 
 import com.sun.jna.Platform;
+import com.ximalaya.codec.TBinary;
+import com.ximalaya.codec.TCompact;
 
 /**
  * desc...
@@ -57,12 +62,6 @@ import com.sun.jna.Platform;
  * @author caorong
  */
 public class TProtocolSniffer {
-
-  private static final byte PROTOCOL_ID = (byte) 0x82;
-  private static final byte VERSION = 1;
-  private static final byte VERSION_MASK = 0x1f; // 0001 1111
-  private static final int TYPE_SHIFT_AMOUNT = 5;
-  private static final byte TYPE_BITS = 0x07; // 0000 0111
 
   private FixedChannelPool fixedChannelPool = null;
   private String[] repostMethods = null;
@@ -141,7 +140,7 @@ public class TProtocolSniffer {
     fixedChannelPool.release(channel);
   }
 
-  public void init() throws PcapNativeException, NotOpenException {
+  public void init(String fport) throws PcapNativeException, NotOpenException {
     PcapNetworkInterface nif = null;
     List<PcapNetworkInterface> allDevs;
     try {
@@ -179,7 +178,12 @@ public class TProtocolSniffer {
 
     //    String filter = "tcp dst port 12121";
     String filter = "";
-    handle.setFilter(filter, BpfProgram.BpfCompileMode.OPTIMIZE);
+    if (fport != null) {
+      handle.setFilter("tcp dst port " + fport.trim(), BpfProgram.BpfCompileMode.OPTIMIZE);
+      System.out.println("set filter => " + "tcp dst port " + fport.trim());
+    } else {
+      handle.setFilter(filter, BpfProgram.BpfCompileMode.OPTIMIZE);
+    }
 
     Runtime.getRuntime().addShutdownHook(new Thread() {
       @Override
@@ -253,19 +257,19 @@ public class TProtocolSniffer {
         if (datalen == frameSize + 4) {
           //  System.out.println(datalen + " - " + frameSize);
           ThriftCodecUtils.MessageType messageType = ThriftCodecUtils.isMainstayProtocol(byteBuf);
+          // 读完magic后, 回退 buf
+          byteBuf.readerIndex(byteBuf.readerIndex() - 2);
           Tuple.Tuple2<String, Byte> methodNameType = null;
           String messageVerStr = null;
           switch (messageType) {
             case originCompactThrift:
-              messageVerStr = "M2";
-              byteBuf.readerIndex(byteBuf.readerIndex() - 2);
-              // 读完 xdcs 后, 回退 buf，以免多读
+              messageVerStr = "M2-C";
               // 解析thrift协议头
-              methodNameType = readCompactMessageBegin(byteBuf);
+              methodNameType = TCompact.readCompactMessageBegin(byteBuf);
               break;
             case originBinaryThrift:
-              // TODO
-              throw new UnsupportedOperationException("binary not supported");
+              messageVerStr = "M2-B";
+              methodNameType = TBinary.readBinaryMessageBegin(byteBuf);
           }
           if (methodNameType != null) {
             String tMessageTypeStr = null;
@@ -305,7 +309,11 @@ public class TProtocolSniffer {
   }
 
   private void sendPackageAsync(final ByteBuf byteBuf, String methodName) {
-    if (fixedChannelPool != null && repostMethods != null && matchMethod(methodName)) {
+    if (fixedChannelPool != null) {
+      // if filter method?
+      if (repostMethods != null && !matchMethod(methodName)) {
+        return;
+      }
       fixedChannelPool.acquire().addListener(new GenericFutureListener<DefaultPromise<? super Channel>>() {
         public void operationComplete(DefaultPromise<? super Channel> future) throws Exception {
           if (future.isSuccess()) {
@@ -336,90 +344,69 @@ public class TProtocolSniffer {
     }
   }
 
-  private Tuple.Tuple2<String, Byte> readBinaryMessageBegin(ByteBuf byteBuf) {
-    // TODO
-    return null;
-  }
+  public static void main(String[] args) throws PcapNativeException, NotOpenException, ParseException {
+    Options options = new Options();
 
-  private Tuple.Tuple2<String, Byte> readCompactMessageBegin(ByteBuf byteBuf)
-      throws TException, UnsupportedEncodingException {
-    byte protocolId = byteBuf.readByte();
-    if (protocolId != PROTOCOL_ID) {
-      throw new TProtocolException(
-          "Expected protocol id " + Integer.toHexString(PROTOCOL_ID) + " but got " + Integer
-              .toHexString(protocolId) + ", may be choosed wrong protocol?");
-    }
-    byte versionAndType = byteBuf.readByte();
-    byte version = (byte) (versionAndType & VERSION_MASK);
-    if (version != VERSION) {
-      throw new TProtocolException("Expected version " + VERSION + " but got " + version);
-    }
-    byte type = (byte) ((versionAndType >> TYPE_SHIFT_AMOUNT) & TYPE_BITS);
-    int seqid = readVarint32(byteBuf);
-    String methodName = readString(byteBuf);
-    return Tuple.tuple(methodName, type);
-  }
+    // add t option
+    Option fportOpt = Option.builder("fport").hasArg().numberOfArgs(1).required(false).type(int.class)
+        .argName("port").desc(" only catch packet with specified port").build();
+    Option toOpt = Option.builder("to").hasArg().numberOfArgs(1).required(false).type(String.class)
+        .argName("ip:port").desc(" send packet to specified thrift server ip:port, e.g 192.168.3.2:10101")
+        .build();
+    Option methodsOpt = Option.builder("methods").hasArg().numberOfArgs(1).numberOfArgs(1).required(false)
+        .type(String.class).argName("methodName").desc(" methods matched to send, split with ',' ").build();
+    Option helpOpt = new Option("h", "print this message");
 
-  private String readString(ByteBuf byteBuf) throws TException, UnsupportedEncodingException {
-    int length = readVarint32(byteBuf);
-    //    System.out.println("readString:" + length);
-    if (length < byteBuf.readableBytes() && length >= 0) {
-      if (length == 0) {
-        return "";
-      } else {
-        byte[] strbyte = new byte[length];
-        byteBuf.readBytes(strbyte);
-        return new String(strbyte, "UTF-8");
-      }
-    } else {
-      throw new RuntimeException("readString length=[" + length + "] is invalid!");
-    }
-  }
+    options.addOption(fportOpt);
+    options.addOption(toOpt);
+    options.addOption(methodsOpt);
+    options.addOption(helpOpt);
 
-  private int readVarint32(ByteBuf byteBuf) throws TException {
-    int result = 0;
-    int shift = 0;
-    if (byteBuf.readableBytes() >= 5) {
-      //      byte[] buf = trans_.getBuffer();
-      //      int pos = trans_.getBufferPosition();
-      int off = 0;
-      while (true) {
-        byte b = byteBuf.readByte();
-        //        byte b = buf[pos + off];
-        result |= (int) (b & 0x7f) << shift;
-        if ((b & 0x80) != 0x80)
-          break;
-        shift += 7;
-        off++;
-      }
-      //      trans_.consumeBuffer(off + 1);
-    } else {
-      while (true) {
-        byte b = byteBuf.readByte(); //readByte();
-        result |= (int) (b & 0x7f) << shift;
-        if ((b & 0x80) != 0x80)
-          break;
-        shift += 7;
-      }
+    CommandLineParser parser = new DefaultParser();
+    CommandLine cmd = null;
+    try {
+      cmd = parser.parse(options, args);
+    } catch (Exception e) {
+      e.printStackTrace();
+      HelpFormatter formatter = new HelpFormatter();
+      formatter.printHelp("thriftcopy", options);
+      System.exit(-1);
     }
-    return result;
-  }
 
-  public static void main(String[] args) throws PcapNativeException, NotOpenException {
+    if (cmd.getOptionValue("h", "false").equals("true")) {
+      HelpFormatter formatter = new HelpFormatter();
+      formatter.printHelp("thriftcopy", options);
+      System.exit(0);
+    }
+    if (cmd.getOptionValue("to") == null) {
+      System.out.println("run thriftcopy as sniffer mode!");
+    }
+
+    //  System.out.println(cmd.getOptionValue("fport"));
+    //  System.out.println(cmd.getOptionValue("to"));
+    //  System.out.println(cmd.getOptionValue("methods"));
+    String to = cmd.getOptionValue("to");
+    String methods = cmd.getOptionValue("methods");
+    String fport = cmd.getOptionValue("fport");
+
     TProtocolSniffer tProtocolSniffer = new TProtocolSniffer();
-    if (args.length > 2) {
+    if (to != null) {
       try {
-        tProtocolSniffer.initNettyClient(args[0], Integer.parseInt(args[1]));
-        System.out.printf(
-            "ready to repost thrift request with methods match %s from local machine to remote mathine %s:%s",
-            Arrays.toString(Arrays.copyOfRange(args, 2, args.length)), args[0], args[1]);
-        tProtocolSniffer.setRepostMethods(Arrays.copyOfRange(args, 2, args.length));
+        String[] ipport = to.split(":");
+        tProtocolSniffer.initNettyClient(ipport[0], Integer.parseInt(ipport[1]));
+        if (methods != null) {
+          tProtocolSniffer.setRepostMethods(methods.split(","));
+        }
+
       } catch (Exception e) {
         e.printStackTrace();
-        System.err.println("param: repostIP repostPort methodName1 methodName2 ...");
-        System.err.println("need not repost package, only sniffer");
       }
     }
-    tProtocolSniffer.init();
+
+    System.out.printf(
+        "ready to repost local thrift request with port [%s] with methods match [%s] from local machine to remote mathine [%s]\n",
+        fport, methods, to);
+
+    tProtocolSniffer.init(fport);
   }
 }
